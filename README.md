@@ -34,7 +34,7 @@ page, so you don't have to dig through step output to find the tunnel address.
 | `vnc_auth` | `legacy` | `legacy` works with any viewer; `ard` is Apple-only (see below) |
 | `ngrok_region` | `us` | `us`, `eu`, `ap`, `au`, `sa`, `jp`, `in` |
 | `duration_minutes` | `300` | how long to hold the machine open |
-| `desktop_user_console` | `false` | log `vncuser` into the console (see below) |
+| `session` | `login-window` | what the console shows when you connect (see below) |
 | `enable_tmate` | `false` | also opens a tmate shell, restricted to the actor |
 
 ## The desktop account
@@ -49,33 +49,59 @@ fails to authenticate is another way to end up staring at a login window.
 
 `VNC_USER_PASSWORD` is therefore required for both backends.
 
-### Giving that account the screen
+### What you see when you connect: the `session` input
 
-Creating the account is easy; giving it a **GUI session** is the awkward part.
-A screen sharing tool can only capture a session that has a window server
-behind it, and on a runner the console session belongs to `runner`. There are
-two ways `vncuser` gets a desktop of its own:
+**`login-window` (default)** — you land on the **macOS login window** and log in
+as `vncuser` yourself, exactly as you would at a physical Mac.
 
-* **Connect as `vncuser` over Apple Screen Sharing.** Authenticating with the
-  system account makes macOS spin up a session for it on demand. This needs a
-  client that speaks Apple's authentication, so it means `vnc_auth: ard`.
-* **`desktop_user_console: true`.** Configures automatic login for `vncuser`
-  and restarts `loginwindow`, handing it the console session. RustDesk then
-  runs as `vncuser` against a real desktop, and the legacy (RealVNC-compatible)
-  VNC path shows that desktop too.
+Getting there does *not* log anybody out. The setup uses `CGSession -suspend`,
+which is what fast user switching's "Login Window…" does: the runner's session
+is parked in the background and keeps running, so the Actions agent survives
+and the job stays alive. Automatic login is switched off first, otherwise
+macOS would log someone straight back in and you would never see the screen.
 
-  ⚠️ **This logs out whoever holds the console**, which is the account the job
-  runs under. If the Actions agent lives in that GUI session, the job ends with
-  it. It is off by default for that reason — try it knowing the run may stop.
+The login window is a genuine GUI session with a window server behind it, so it
+screen-shares like any desktop — and because it belongs to the system rather
+than to a user, this is the one mode that works without anyone being logged in
+first.
 
-When `vncuser` has no GUI session, RustDesk falls back to the console account
-and says so rather than capturing a session that does not exist:
+**`auto-login`** — `vncuser` is already logged in on the console when you
+connect. This one *does* log out whoever holds the console, by configuring
+automatic login and restarting `loginwindow`. ⚠️ If the Actions agent lives in
+that GUI session, the job ends with it — use it knowing the run may stop.
+
+**`as-is`** — leave the console exactly as the runner booted it.
+
+The run tells you which of these you are getting:
 
 ```
-[warn] vncuser has no GUI session, so there would be no screen to capture
-[warn] falling back to the console account 'runner'
-[warn] set DESKTOP_USER_CONSOLE=yes to log vncuser in and hand it the console
+==> disabling automatic login so the machine stops at the login window
+==> suspending runner's session to reveal the login window
+==> login window is on the console after 6s
+==> VNC is ready -- you will land on the macOS login window
+==> log in there as 'vncuser' with the VNC_USER_PASSWORD secret
 ```
+
+Note that you authenticate **twice**, with two different passwords: the
+`VNC_PASSWORD` secret gets the VNC connection open, and then
+`VNC_USER_PASSWORD` logs `vncuser` in at the macOS login window.
+
+### RustDesk cannot show the login window
+
+RustDesk runs inside a user's GUI session, so it can only ever display a
+desktop somebody is already logged into. The login window belongs to the
+system, not to a user, which is why reaching it is the VNC backend's job. With
+`session: login-window` the RustDesk setup says so rather than sitting on a
+blank screen:
+
+```
+[warn] session mode is 'login-window', which RustDesk cannot display
+[warn] it runs inside a user session, and the login window is not one
+[warn] use the VNC backend to reach the login screen
+```
+
+Once you have logged in as `vncuser` through VNC, that account has a session
+and RustDesk can attach to it.
 
 ## Which VNC client can connect
 

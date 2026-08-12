@@ -314,6 +314,60 @@ enable_autologin() {
   sudo chmod 600 /etc/kcpassword
 }
 
+CGSESSION=${CGSESSION:-"/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession"}
+
+disable_autologin() {
+  sudo defaults delete /Library/Preferences/com.apple.loginwindow autoLoginUser >/dev/null 2>&1 || true
+  sudo rm -f /etc/kcpassword
+}
+
+# Park the console at the macOS login window so a viewer can log in by hand.
+#
+# This is fast user switching's "Login Window..." action, not a logout: the
+# current session is suspended and keeps running in the background, so the
+# Actions agent living in it survives. The login window is a real GUI session
+# with a window server behind it, so it screen-shares like any desktop.
+show_login_window() {
+  local current
+  current=$(console_user)
+
+  # Automatic login would immediately log someone back in and skip the very
+  # screen we are trying to reach.
+  log "disabling automatic login so the machine stops at the login window"
+  disable_autologin
+
+  # Show the user list rather than a blank name field, so the account is
+  # visible and one click away.
+  sudo defaults write /Library/Preferences/com.apple.loginwindow SHOWFULLNAME -bool false >/dev/null 2>&1 || true
+
+  if [ "$current" = root ]; then
+    log "console is already at the login window"
+    return 0
+  fi
+
+  if sudo test ! -x "$CGSESSION"; then
+    warn "CGSession is missing, cannot reach the login window without a logout"
+    return 1
+  fi
+
+  log "suspending ${current}'s session to reveal the login window"
+  as_user "$current" "$CGSESSION" -suspend || warn "CGSession -suspend returned non-zero"
+
+  local waited=0 owner
+  while [ "$waited" -lt 60 ]; do
+    sleep 3
+    waited=$((waited + 3))
+    owner=$(console_user)
+    if [ "$owner" = root ]; then
+      log "login window is on the console after ${waited}s"
+      return 0
+    fi
+  done
+
+  warn "console is still owned by $(console_user) -- the login window did not appear"
+  return 1
+}
+
 # Hand the console session to <user> by restarting loginwindow, which re-reads
 # the autologin settings when it comes back up.
 #

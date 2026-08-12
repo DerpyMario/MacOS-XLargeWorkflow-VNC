@@ -37,10 +37,14 @@ on:
         type: choice
         default: '300'
         options: ['30', '60', '120', '180', '300', '350']
-      desktop_user_console:
-        description: 'Log vncuser into the console (restarts loginwindow, may end the job)'
-        type: boolean
-        default: false
+      session:
+        description: 'What the console shows when you connect'
+        type: choice
+        default: login-window
+        options:
+          - login-window
+          - auto-login
+          - as-is
       enable_tmate:
         description: 'Also open a tmate shell'
         type: boolean
@@ -88,7 +92,7 @@ jobs:
           VNC_USER_PASSWORD: ${{ secrets.VNC_USER_PASSWORD }}
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
           VNC_AUTH_MODE: ${{ inputs.vnc_auth }}
-          DESKTOP_USER_CONSOLE: ${{ inputs.desktop_user_console && 'yes' || 'no' }}
+          SESSION_MODE: ${{ inputs.session }}
         run: bash scripts/setup-vnc.sh "$VNC_USER_PASSWORD" "$VNC_PASSWORD"
 
       - name: Open the ngrok tunnel
@@ -106,8 +110,7 @@ jobs:
           RUSTDESK_HOST: ${{ secrets.RUSTDESK_HOST }}
           RUSTDESK_KEY: ${{ secrets.RUSTDESK_KEY }}
           VNC_USER_PASSWORD: ${{ secrets.VNC_USER_PASSWORD }}
-          # Only switch the console here when VNC has not already done it.
-          DESKTOP_USER_CONSOLE: ${{ inputs.desktop_user_console && inputs.backend == 'rustdesk' && 'yes' || 'no' }}
+          SESSION_MODE: ${{ inputs.session }}
         run: bash scripts/setup-rustdesk.sh "$RUSTDESK_PASSWORD" "$VNC_USER_PASSWORD"
 
       - name: Connection details
@@ -116,8 +119,13 @@ jobs:
           if [ "${{ inputs.backend }}" != rustdesk ]; then
             echo " VNC over ngrok : ${{ steps.ngrok.outputs.address }}"
             echo " Screen Sharing : ${{ steps.ngrok.outputs.vnc_url }}"
-            echo " Username       : vncuser  (VNC_USER_PASSWORD secret)"
-            echo " VNC-only pass  : VNC_PASSWORD secret"
+            echo " Connect with   : VNC_PASSWORD secret (the VNC-only password)"
+            if [ "${{ inputs.session }}" = login-window ]; then
+              echo " You will see   : the macOS login window"
+              echo " Log in there as: vncuser  (VNC_USER_PASSWORD secret)"
+            else
+              echo " Account        : vncuser  (VNC_USER_PASSWORD secret)"
+            fi
           fi
           if [ "${{ inputs.backend }}" != vnc ]; then
             echo " RustDesk ID    : ${{ steps.rustdesk.outputs.rustdesk_id }}"

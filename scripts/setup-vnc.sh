@@ -17,9 +17,11 @@ VNC_ALWAYS_CONSOLE=${VNC_ALWAYS_CONSOLE:-yes}
 # legacy = plain Screen Sharing, security type 2, works with any viewer.
 # ard    = Remote Management, Apple-only security types 30/33/35.
 VNC_AUTH_MODE=${VNC_AUTH_MODE:-legacy}
-# Hand the console session to $VNC_USER instead of leaving it with the runner
-# account. See switch_console_to() for why this is not the default.
-DESKTOP_USER_CONSOLE=${DESKTOP_USER_CONSOLE:-no}
+# What the console shows when you connect:
+#   login-window = the macOS login screen, so you log in as $VNC_USER yourself
+#   auto-login   = $VNC_USER already logged in on the console
+#   as-is        = whatever the runner booted into
+SESSION_MODE=${SESSION_MODE:-login-window}
 
 KICKSTART=${KICKSTART:-/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart}
 
@@ -36,12 +38,22 @@ sudo mdutil -i off -a >/dev/null 2>&1 || true
 # ---------------------------------------------------------------------------
 ensure_desktop_user "$VNC_USER" "$USER_PASSWORD"
 
-# Optionally hand the console session to the desktop account, so the desktop
-# served over VNC belongs to it rather than to the runner account.
-if [ "$DESKTOP_USER_CONSOLE" = yes ]; then
-  switch_console_to "$VNC_USER" "$USER_PASSWORD" || \
-    warn "continuing with $(console_user) on the console"
-fi
+# Decide what is on the console when the viewer connects.
+case $SESSION_MODE in
+  login-window)
+    show_login_window || warn "continuing with $(console_user) on the console"
+    ;;
+  auto-login)
+    switch_console_to "$VNC_USER" "$USER_PASSWORD" || \
+      warn "continuing with $(console_user) on the console"
+    ;;
+  as-is)
+    log "leaving the console session as the runner booted it"
+    ;;
+  *)
+    die "unknown SESSION_MODE '$SESSION_MODE' (login-window, auto-login or as-is)"
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Screen Sharing permissions
@@ -186,4 +198,25 @@ else
   warn "python3 not available -- skipping the authentication check"
 fi
 
-log "VNC is ready for user '$VNC_USER'"
+# ---------------------------------------------------------------------------
+# Say what the viewer will actually be looking at
+# ---------------------------------------------------------------------------
+case $SESSION_MODE in
+  login-window)
+    if [ "$(console_user)" = root ]; then
+      log "VNC is ready -- you will land on the macOS login window"
+      log "log in there as '$VNC_USER' with the VNC_USER_PASSWORD secret"
+      summary "Connecting lands on the **macOS login window**. Log in as \`$VNC_USER\`."
+    else
+      warn "VNC is ready, but the console still shows $(console_user)'s desktop"
+      warn "the login window could not be reached -- see the warnings above"
+    fi
+    ;;
+  auto-login)
+    log "VNC is ready -- '$VNC_USER' should already be logged in on the console"
+    summary "Connecting lands on \`$VNC_USER\`'s desktop."
+    ;;
+  *)
+    log "VNC is ready -- the console shows $(console_user)'s session"
+    ;;
+esac
