@@ -20,6 +20,13 @@ on:
           - vnc
           - rustdesk
           - both
+      vnc_auth:
+        description: 'VNC authentication (legacy works with RealVNC/TigerVNC)'
+        type: choice
+        default: legacy
+        options:
+          - legacy
+          - ard
       ngrok_region:
         description: 'ngrok region (VNC only)'
         type: choice
@@ -74,6 +81,7 @@ jobs:
         env:
           VNC_USER_PASSWORD: ${{ secrets.VNC_USER_PASSWORD }}
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          VNC_AUTH_MODE: ${{ inputs.vnc_auth }}
         run: bash scripts/setup-vnc.sh "$VNC_USER_PASSWORD" "$VNC_PASSWORD"
 
       - name: Open the ngrok tunnel

@@ -14,6 +14,9 @@ USER_PASSWORD=${1:?VNC_USER_PASSWORD is required}
 VNC_PASSWORD=${2:-}
 VNC_USER=${VNC_USER:-vncuser}
 VNC_ALWAYS_CONSOLE=${VNC_ALWAYS_CONSOLE:-yes}
+# legacy = plain Screen Sharing, security type 2, works with any viewer.
+# ard    = Remote Management, Apple-only security types 30/33/35.
+VNC_AUTH_MODE=${VNC_AUTH_MODE:-legacy}
 
 KICKSTART=${KICKSTART:-/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart}
 
@@ -94,14 +97,34 @@ done
 restart_tccd
 
 # ---------------------------------------------------------------------------
-# Enable Remote Management + legacy VNC
+# Choose which authentication the server offers
 # ---------------------------------------------------------------------------
-log "enabling Remote Management for all users with full privileges"
-sudo "$KICKSTART" -configure -allowAccessFor -allUsers -privs -all
-sudo "$KICKSTART" -activate -configure -access -on
+# Remote Management (ARD) advertises Apple's proprietary security types 30/33/35.
+# Viewers that only partly implement them do not fall back -- RealVNC Viewer
+# aborts the handshake with "key length too large" before it ever asks for a
+# password. Plain Screen Sharing with the legacy VNC password advertises
+# security type 2, which every viewer understands, so that is the default.
+# Set VNC_AUTH_MODE=ard to get the full ARD feature set back.
+if [ "$VNC_AUTH_MODE" = legacy ]; then
+  log "using plain Screen Sharing with legacy VNC auth (cross-platform viewers)"
+  sudo "$KICKSTART" -deactivate -configure -access -off >/dev/null 2>&1 || true
+  sudo defaults write /Library/Preferences/com.apple.RemoteManagement \
+    VNCLegacyConnectionsEnabled -bool true 2>/dev/null || true
 
-sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true 2>/dev/null || true
-sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsersPrivs -int -1073741569 2>/dev/null || true
+  # The access group only exists when access is restricted; when it does, an
+  # account that is not a member gets authenticated and then disconnected.
+  if sudo dseditgroup -o read com.apple.access_screensharing >/dev/null 2>&1; then
+    sudo dseditgroup -o edit -a "$VNC_USER" -t user com.apple.access_screensharing >/dev/null 2>&1 || true
+    log "added $VNC_USER to com.apple.access_screensharing"
+  fi
+else
+  log "enabling Remote Management for all users with full privileges"
+  sudo "$KICKSTART" -configure -allowAccessFor -allUsers -privs -all
+  sudo "$KICKSTART" -activate -configure -access -on
+
+  sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsers -bool true 2>/dev/null || true
+  sudo defaults write /Library/Preferences/com.apple.RemoteManagement ARD_AllLocalUsersPrivs -int -1073741569 2>/dev/null || true
+fi
 
 # Force incoming sessions onto the real console instead of a virtual display.
 # The console is the one session with a framebuffer the window server is
@@ -116,6 +139,9 @@ fi
 
 if [ -n "$VNC_PASSWORD" ]; then
   log "enabling the legacy VNC password"
+  if [ ${#VNC_PASSWORD} -gt 8 ]; then
+    warn "the VNC protocol only carries 8 characters -- only the first 8 of VNC_PASSWORD count"
+  fi
   # Supported directly on recent releases...
   if ! sudo "$KICKSTART" -configure -clientopts -setvnclegacy -vnclegacy yes \
         -setvncpw -vncpw "$VNC_PASSWORD" >/dev/null 2>&1; then
@@ -136,11 +162,17 @@ else
   warn "no VNC_PASSWORD given -- only system-account logins will work"
 fi
 
-log "starting the screen sharing daemons"
+log "starting the screen sharing daemon"
+# The daemon reads VNCLegacyConnectionsEnabled and the password file at start,
+# so it has to come up after both are in place.
 sudo launchctl enable system/com.apple.screensharing >/dev/null 2>&1 || true
 sudo launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1 || true
-sudo "$KICKSTART" -restart -agent -console
-sudo "$KICKSTART" -activate
+if [ "$VNC_AUTH_MODE" = legacy ]; then
+  sudo launchctl kickstart -k system/com.apple.screensharing >/dev/null 2>&1 || true
+else
+  sudo "$KICKSTART" -restart -agent -console
+  sudo "$KICKSTART" -activate
+fi
 
 keep_display_awake "$(console_user)"
 
@@ -166,5 +198,25 @@ fi
 
 probe_screen /tmp/screen-probe.png || \
   warn "the screen probe did not look healthy -- see the troubleshooting notes in the README"
+
+# ---------------------------------------------------------------------------
+# Report which authentication the server ended up offering
+# ---------------------------------------------------------------------------
+# Whether a given viewer can connect is decided entirely by this list, so it is
+# worth knowing now rather than from a client-side protocol error later.
+if command -v python3 >/dev/null 2>&1; then
+  log "checking which authentication types the server offers"
+  python3 ./rfb-probe.py 127.0.0.1 5900
+  case $? in
+    0) log "cross-platform viewers (RealVNC, TigerVNC, Remmina) can authenticate" ;;
+    1) warn "only Apple authentication is on offer"
+       warn "viewers such as RealVNC will fail with a protocol error"
+       warn "set the VNC_PASSWORD secret, or use Apple Screen Sharing as the client"
+       echo "::warning::VNC server is not offering legacy auth; RealVNC-style viewers will fail" ;;
+    *) warn "could not determine the offered authentication types" ;;
+  esac
+else
+  warn "python3 not available -- skipping the authentication check"
+fi
 
 log "VNC is ready for user '$VNC_USER'"
