@@ -1,22 +1,143 @@
 name: mac
-on: 
+
+on:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner image'
+        type: choice
+        default: macos-26-intel
+        options:
+          - macos-26-intel
+          - macos-26
+          - macos-15-intel
+          - macos-15
+      backend:
+        description: 'Remote desktop backend'
+        type: choice
+        default: vnc
+        options:
+          - vnc
+          - rustdesk
+          - both
+      ngrok_region:
+        description: 'ngrok region (VNC only)'
+        type: choice
+        default: us
+        options: [us, eu, ap, au, sa, jp, in]
+      duration_minutes:
+        description: 'How long to hold the session open'
+        type: choice
+        default: '300'
+        options: ['30', '60', '120', '180', '300', '350']
+      enable_tmate:
+        description: 'Also open a tmate shell'
+        type: boolean
+        default: false
+
 defaults:
   run:
     shell: bash
 
 jobs:
-  build:
-    runs-on: macos-26
+  remote-desktop:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+
     steps:
-    - uses: actions/checkout@v2
-    - name: Setting the environment up.
-      env:
-        NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-        VNC_USER_PASSWORD: ${{ secrets.VNC_USER_PASSWORD }}
-        VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
-      run: source configure.sh "$VNC_USER_PASSWORD" "$VNC_PASSWORD" "$NGROK_AUTH_TOKEN"
-    - name: ngrok is now listening to VNC connections on...
-      run: curl --silent http://127.0.0.1:4040/api/tunnels | jq '.tunnels[0].public_url'
-    - name: Setup tmate session
-      uses: mxschmitt/action-tmate@v2
+      - uses: actions/checkout@v4
+
+      - name: Check the required secrets are set
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+          VNC_USER_PASSWORD: ${{ secrets.VNC_USER_PASSWORD }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
+        run: |
+          missing=()
+          if [ "${{ inputs.backend }}" != rustdesk ]; then
+            [ -n "$NGROK_AUTH_TOKEN" ]  || missing+=(NGROK_AUTH_TOKEN)
+            [ -n "$VNC_USER_PASSWORD" ] || missing+=(VNC_USER_PASSWORD)
+            [ -n "$VNC_PASSWORD" ]      || missing+=(VNC_PASSWORD)
+          fi
+          if [ "${{ inputs.backend }}" != vnc ]; then
+            [ -n "$RUSTDESK_PASSWORD" ] || missing+=(RUSTDESK_PASSWORD)
+          fi
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing repository secrets: ${missing[*]}"
+            echo "Add them under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+      - name: Set up screen sharing and permissions
+        if: inputs.backend != 'rustdesk'
+        env:
+          VNC_USER_PASSWORD: ${{ secrets.VNC_USER_PASSWORD }}
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: bash scripts/setup-vnc.sh "$VNC_USER_PASSWORD" "$VNC_PASSWORD"
+
+      - name: Open the ngrok tunnel
+        id: ngrok
+        if: inputs.backend != 'rustdesk'
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: bash scripts/ngrok.sh "$NGROK_AUTH_TOKEN" "${{ inputs.ngrok_region }}" 5900
+
+      - name: Set up RustDesk
+        id: rustdesk
+        if: inputs.backend != 'vnc'
+        env:
+          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
+          RUSTDESK_HOST: ${{ secrets.RUSTDESK_HOST }}
+          RUSTDESK_KEY: ${{ secrets.RUSTDESK_KEY }}
+        run: bash scripts/setup-rustdesk.sh "$RUSTDESK_PASSWORD"
+
+      - name: Connection details
+        run: |
+          echo "=============================================================="
+          if [ "${{ inputs.backend }}" != rustdesk ]; then
+            echo " VNC over ngrok : ${{ steps.ngrok.outputs.address }}"
+            echo " Screen Sharing : ${{ steps.ngrok.outputs.vnc_url }}"
+            echo " Username       : vncuser  (VNC_USER_PASSWORD secret)"
+            echo " VNC-only pass  : VNC_PASSWORD secret"
+          fi
+          if [ "${{ inputs.backend }}" != vnc ]; then
+            echo " RustDesk ID    : ${{ steps.rustdesk.outputs.rustdesk_id }}"
+            echo " RustDesk pass  : RUSTDESK_PASSWORD secret"
+          fi
+          echo "=============================================================="
+
+      # A screenshot taken on the runner is the fastest way to tell a broken
+      # capture permission apart from a broken tunnel.
+      - name: Upload the screen probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-probe
+          path: |
+            /tmp/screen-probe.png
+            /tmp/rustdesk-probe.png
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Setup tmate session
+        if: inputs.enable_tmate
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+
+      - name: Hold the session open
+        run: |
+          end=$(( $(date +%s) + ${{ inputs.duration_minutes }} * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            left=$(( (end - $(date +%s)) / 60 ))
+            if [ "${{ inputs.backend }}" != rustdesk ]; then
+              echo "[$(date -u +%H:%M:%S)] ${left}m left -- vnc://${{ steps.ngrok.outputs.address }}"
+              nc -z 127.0.0.1 5900 || echo "::warning::the VNC listener went away"
+              pgrep -qx ngrok      || echo "::warning::the ngrok agent is no longer running"
+            else
+              echo "[$(date -u +%H:%M:%S)] ${left}m left -- RustDesk ID ${{ steps.rustdesk.outputs.rustdesk_id }}"
+            fi
+            sleep 300
+          done
+          echo "Session window elapsed, shutting down."

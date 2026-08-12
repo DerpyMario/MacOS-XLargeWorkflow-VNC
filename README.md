@@ -1,23 +1,87 @@
 # fastmac-gui
 
-> Get a MacOS desktop over VNC, for free, in around 5 minutes
+> Get a MacOS desktop over VNC or RustDesk, for free, in around 5 minutes
 
-This repo extends upon fastmac, enabling the built in MacOS VNC server, doing a hacky trick to set a VNC password and a new admin user account, and adds ngrok to your system to set up a tcp tunnel for VNC/Apple Screen Sharing.
+This repo extends upon fastmac, enabling the built in MacOS VNC server, doing a hacky trick to set a VNC password and a new admin user account, and adds ngrok to your system to set up a tcp tunnel for VNC/Apple Screen Sharing. RustDesk is available as an alternative backend, and the setup pre-approves the macOS privacy permissions that otherwise leave you staring at a black screen.
 
-Things you'll need to do:
+## Quick start
 
 * Clone this repo
-* Add three secrets to your cloned repo:
-  * `NGROK_AUTH_TOKEN` with your auth key from https://dashboard.ngrok.com/auth
-  * `VNC_USER_PASSWORD` with the desired password for the "VNC User" (`vncuser`) account
-  * `VNC_PASSWORD` for the VNC-only password
-* Start the workflow (as described below)
+* Add secrets to your cloned repo under **Settings → Secrets and variables → Actions**:
 
-Once the flow is started and you're in the status, you can view the 'you can VNC to...' section in the workflow log for your ngrok tunnel VNC address.
+  | Secret | Needed for | What it is |
+  |---|---|---|
+  | `NGROK_AUTH_TOKEN` | VNC | your auth key from https://dashboard.ngrok.com/auth |
+  | `VNC_USER_PASSWORD` | VNC | password for the "VNC User" (`vncuser`) account |
+  | `VNC_PASSWORD` | VNC | the VNC-only password (**first 8 characters only** — a VNC protocol limit) |
+  | `RUSTDESK_PASSWORD` | RustDesk | unattended access password |
+  | `RUSTDESK_HOST` | RustDesk (optional) | self-hosted rendezvous/relay server |
+  | `RUSTDESK_KEY` | RustDesk (optional) | public key for the self-hosted server |
 
-TODO: find a better way to somehow broadcast that ngrok is up and has a tunnel address
+* Run the workflow from **Actions → mac → Run workflow**. The workflow is
+  `workflow_dispatch` only, so it never fires on a push and never burns minutes
+  by accident.
+
+The connection details are printed in the log **and** written to the run summary
+page, so you don't have to dig through step output to find the tunnel address.
+
+### Workflow inputs
+
+| Input | Default | Notes |
+|---|---|---|
+| `runner` | `macos-26-intel` | also `macos-26`, `macos-15-intel`, `macos-15` |
+| `backend` | `vnc` | `vnc`, `rustdesk`, or `both` |
+| `ngrok_region` | `us` | `us`, `eu`, `ap`, `au`, `sa`, `jp`, `in` |
+| `duration_minutes` | `300` | how long to hold the machine open |
+| `enable_tmate` | `false` | also opens a tmate shell, restricted to the actor |
 
 *NOTE* If you're using Apple Screen Sharing or RealVNC Viewer, use the system username and password ("VNC User"/your set password), NOT your VNC-only password!
+
+## Why the screen used to come up black
+
+Connecting successfully and then seeing nothing is the classic failure here, and
+it has four separate causes. `scripts/setup-vnc.sh` and
+`scripts/setup-rustdesk.sh` address all of them:
+
+* **No Screen Recording permission.** Since Catalina, screen capture requires
+  TCC consent. A headless runner has nobody to click the prompt, so the capture
+  silently returns empty frames. The setup writes the grants straight into the
+  consent database (`scripts/common.sh:tcc_grant`) before anything starts, then
+  restarts `tccd` so they take effect. The `access` table schema has changed
+  across releases, so the INSERT is built from the columns the machine actually
+  has. This needs SIP to be disabled, which is the case on GitHub's macOS
+  images — the script says so explicitly in the log if it isn't.
+* **The display went to sleep, or the screen saver kicked in.** Both are served
+  to the client as a black rectangle. Sleep, display sleep and the screen saver
+  are disabled, any running `ScreenSaverEngine` is killed, and a `caffeinate`
+  assertion is held for the life of the job.
+* **The session landed on a virtual display instead of the console.**
+  `VNCAlwaysStartOnConsole` pins incoming sessions to the real framebuffer the
+  window server is already drawing into. Set `VNC_ALWAYS_CONSOLE=no` to opt out.
+* **A brand new account boots into Setup Assistant**, which reads as a blank
+  screen over VNC. Its prompts are pre-answered for `vncuser`.
+
+### Diagnosing it if it still happens
+
+Every run takes a screenshot on the runner itself and uploads it as the
+`screen-probe` artifact. That splits the problem cleanly in two:
+
+* **The artifact looks like a desktop** → capture works; the problem is your
+  client, the tunnel, or the credentials.
+* **The artifact is black or missing** → capture is broken on the machine. The
+  log says which check failed. An all-black PNG compresses to almost nothing,
+  so the script also warns when the capture is suspiciously small.
+
+## Repo layout
+
+| File | Purpose |
+|---|---|
+| `.github/workflows/mac.yml` | the `workflow_dispatch` workflow |
+| `scripts/common.sh` | TCC grants, display/sleep handling, screen probe |
+| `scripts/setup-vnc.sh` | desktop account + Apple Screen Sharing |
+| `scripts/setup-rustdesk.sh` | RustDesk install, permissions and unattended password |
+| `scripts/ngrok.sh` | tunnel setup and address reporting |
+| `configure.sh` | thin wrapper kept for the original one-shot invocation |
 
 ----
 # Lessons learned in my hacking this to bits:
