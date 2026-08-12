@@ -181,6 +181,15 @@ probe_screen() {
   log "framebuffer is producing a real image"
 }
 
+# True when RustDesk has stored a non-empty permanent password in <dir>.
+# The value is obfuscated on disk, so all we can check is that one is present:
+# an empty or absent field means RustDesk is still handing out one-time codes.
+rustdesk_password_stored() {
+  local config="$1/RustDesk.toml"
+  sudo test -f "$config" || return 1
+  sudo grep -Eq "^password[[:space:]]*=[[:space:]]*'.+'" "$config"
+}
+
 # Append a line to the run summary when we are inside GitHub Actions.
 summary() {
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0

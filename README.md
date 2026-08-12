@@ -31,9 +31,63 @@ page, so you don't have to dig through step output to find the tunnel address.
 |---|---|---|
 | `runner` | `macos-26-intel` | also `macos-26`, `macos-15-intel`, `macos-15` |
 | `backend` | `vnc` | `vnc`, `rustdesk`, or `both` |
+| `vnc_auth` | `legacy` | `legacy` works with any viewer; `ard` is Apple-only (see below) |
 | `ngrok_region` | `us` | `us`, `eu`, `ap`, `au`, `sa`, `jp`, `in` |
 | `duration_minutes` | `300` | how long to hold the machine open |
 | `enable_tmate` | `false` | also opens a tmate shell, restricted to the actor |
+
+## Which VNC client can connect
+
+macOS advertises several authentication schemes, and the viewer picks one
+before any password is exchanged. Apple's own types (30, 33, 35) are only
+partly implemented by third-party viewers, and they abort the handshake rather
+than falling back — **RealVNC Viewer reports `Protocol error: key length too
+large`**, which looks like a broken tunnel but is really an auth mismatch.
+
+Enabling **Remote Management** (ARD) is what puts those Apple-only types on the
+wire. The default `vnc_auth: legacy` therefore uses plain **Screen Sharing**
+with the legacy VNC password, which advertises security type 2 — the one every
+viewer understands.
+
+Each run prints the types the server actually ended up offering:
+
+```
+security types offered   : 2, 30
+    2  VNC password (legacy, understood by every viewer)
+   30  Apple Diffie-Hellman (RealVNC fails with 'key length too large')
+legacy VNC auth is available -- cross-platform viewers can connect
+```
+
+| Client | `legacy` (default) | `ard` |
+|---|---|---|
+| Apple Screen Sharing (macOS) | works | works |
+| RealVNC Viewer | works | **fails: key length too large** |
+| TigerVNC / Remmina / TightVNC | works | fails |
+
+In `legacy` mode, authenticate with the **`VNC_PASSWORD`** secret (the VNC-only
+password), not the account password. Remember only its first 8 characters are
+used — the protocol carries no more, and the setup warns if yours is longer.
+
+Choose `ard` only if you specifically need Apple Remote Desktop features and
+are connecting from macOS.
+
+## RustDesk unattended access
+
+Two RustDesk defaults make a CI host unusable, and together they produce
+exactly the "Connected, waiting for image" hang with a one-time password that
+keeps changing:
+
+* `approve-mode` defaults to asking someone **at the host** to click Accept.
+  Nobody is sitting at a runner, so the viewer waits for an image that is never
+  authorised.
+* `verification-method` defaults to a **temporary** password that RustDesk
+  regenerates on restart, invalidating whatever was printed in the log.
+
+The setup writes `approve-mode = 'password'` and
+`verification-method = 'use-permanent-password'`, sets your `RUSTDESK_PASSWORD`
+as the permanent password, and then **verifies both actually persisted** —
+RustDesk rewrites its own config on startup, so the run re-applies them and
+restarts the app if they did not stick.
 
 *NOTE* If you're using Apple Screen Sharing or RealVNC Viewer, use the system username and password ("VNC User"/your set password), NOT your VNC-only password!
 
@@ -81,6 +135,7 @@ Every run takes a screenshot on the runner itself and uploads it as the
 | `scripts/setup-vnc.sh` | desktop account + Apple Screen Sharing |
 | `scripts/setup-rustdesk.sh` | RustDesk install, permissions and unattended password |
 | `scripts/ngrok.sh` | tunnel setup and address reporting |
+| `scripts/rfb-probe.py` | reports which VNC auth types the server offers |
 | `configure.sh` | thin wrapper kept for the original one-shot invocation |
 
 ----
