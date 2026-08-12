@@ -8,7 +8,7 @@
 #   RUSTDESK_HOST         self-hosted rendezvous/relay server
 #   RUSTDESK_KEY          public key for the self-hosted server
 #   VNC_USER              desktop account name (default vncuser)
-#   DESKTOP_USER_CONSOLE  yes = give the desktop account the console session
+#   SESSION_MODE          login-window | auto-login | as-is
 
 set -uo pipefail
 
@@ -21,7 +21,7 @@ VNC_USER_PASSWORD=${2:-}
 RUSTDESK_HOST=${RUSTDESK_HOST:-}
 RUSTDESK_KEY=${RUSTDESK_KEY:-}
 VNC_USER=${VNC_USER:-vncuser}
-DESKTOP_USER_CONSOLE=${DESKTOP_USER_CONSOLE:-no}
+SESSION_MODE=${SESSION_MODE:-login-window}
 
 APP=/Applications/RustDesk.app
 BIN="$APP/Contents/MacOS/rustdesk"
@@ -34,26 +34,34 @@ BUNDLE_ID=com.carriez.RustDesk
 # so the remote session is a normal desktop login with a password you control.
 if [ -n "$VNC_USER_PASSWORD" ]; then
   ensure_desktop_user "$VNC_USER" "$VNC_USER_PASSWORD"
-  if [ "$DESKTOP_USER_CONSOLE" = yes ]; then
-    switch_console_to "$VNC_USER" "$VNC_USER_PASSWORD" || \
-      warn "continuing with $(console_user) on the console"
-  fi
 else
   warn "no VNC_USER_PASSWORD supplied -- cannot create the $VNC_USER account"
 fi
 
-# RustDesk can only capture a session that has a window server behind it, so it
-# runs as the desktop account when that account is logged in, and falls back to
-# whoever holds the console when it is not.
+# RustDesk runs inside a user's GUI session, so it can only ever show a desktop
+# that somebody is logged into. The login window belongs to the system, not to
+# a user, which is why RustDesk cannot serve it -- that is the VNC backend's job.
+if [ "$SESSION_MODE" = login-window ]; then
+  warn "session mode is 'login-window', which RustDesk cannot display"
+  warn "it runs inside a user session, and the login window is not one"
+  warn "use the VNC backend to reach the login screen"
+fi
+
+# Prefer the desktop account when it is logged in; otherwise fall back to
+# whoever holds the console, so we never capture a session that does not exist.
 CONSOLE_USER=$(console_user)
 if user_has_gui_session "$VNC_USER"; then
   DESKTOP_USER=$VNC_USER
   log "running RustDesk as $DESKTOP_USER (has a GUI session)"
-else
+elif [ "$CONSOLE_USER" != root ]; then
   DESKTOP_USER=$CONSOLE_USER
   warn "$VNC_USER has no GUI session, so there would be no screen to capture"
   warn "falling back to the console account '$CONSOLE_USER'"
-  warn "set DESKTOP_USER_CONSOLE=yes to log $VNC_USER in and hand it the console"
+  warn "log in as $VNC_USER over VNC, or use SESSION_MODE=auto-login"
+else
+  DESKTOP_USER=$VNC_USER
+  warn "nobody is logged in (the console is at the login window)"
+  warn "RustDesk will have no screen until someone logs in as $VNC_USER"
 fi
 
 log "installing RustDesk"
