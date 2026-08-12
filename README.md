@@ -34,7 +34,48 @@ page, so you don't have to dig through step output to find the tunnel address.
 | `vnc_auth` | `legacy` | `legacy` works with any viewer; `ard` is Apple-only (see below) |
 | `ngrok_region` | `us` | `us`, `eu`, `ap`, `au`, `sa`, `jp`, `in` |
 | `duration_minutes` | `300` | how long to hold the machine open |
+| `desktop_user_console` | `false` | log `vncuser` into the console (see below) |
 | `enable_tmate` | `false` | also opens a tmate shell, restricted to the actor |
+
+## The desktop account
+
+Both backends run the desktop as a dedicated **admin account, `vncuser`**, created
+with your `VNC_USER_PASSWORD` — not as the `runner` account the CI job uses.
+`runner` cannot be reused: it holds a SecureToken, so macOS refuses to reset its
+password without the old one, and there is no credential left to give a client.
+The account is created, added to `admin`, and its password is **verified with
+`dscl -authonly`** before anything else runs, because a login that silently
+fails to authenticate is another way to end up staring at a login window.
+
+`VNC_USER_PASSWORD` is therefore required for both backends.
+
+### Giving that account the screen
+
+Creating the account is easy; giving it a **GUI session** is the awkward part.
+A screen sharing tool can only capture a session that has a window server
+behind it, and on a runner the console session belongs to `runner`. There are
+two ways `vncuser` gets a desktop of its own:
+
+* **Connect as `vncuser` over Apple Screen Sharing.** Authenticating with the
+  system account makes macOS spin up a session for it on demand. This needs a
+  client that speaks Apple's authentication, so it means `vnc_auth: ard`.
+* **`desktop_user_console: true`.** Configures automatic login for `vncuser`
+  and restarts `loginwindow`, handing it the console session. RustDesk then
+  runs as `vncuser` against a real desktop, and the legacy (RealVNC-compatible)
+  VNC path shows that desktop too.
+
+  ⚠️ **This logs out whoever holds the console**, which is the account the job
+  runs under. If the Actions agent lives in that GUI session, the job ends with
+  it. It is off by default for that reason — try it knowing the run may stop.
+
+When `vncuser` has no GUI session, RustDesk falls back to the console account
+and says so rather than capturing a session that does not exist:
+
+```
+[warn] vncuser has no GUI session, so there would be no screen to capture
+[warn] falling back to the console account 'runner'
+[warn] set DESKTOP_USER_CONSOLE=yes to log vncuser in and hand it the console
+```
 
 ## Which VNC client can connect
 

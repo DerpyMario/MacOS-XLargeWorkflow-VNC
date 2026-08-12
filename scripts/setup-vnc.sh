@@ -17,6 +17,9 @@ VNC_ALWAYS_CONSOLE=${VNC_ALWAYS_CONSOLE:-yes}
 # legacy = plain Screen Sharing, security type 2, works with any viewer.
 # ard    = Remote Management, Apple-only security types 30/33/35.
 VNC_AUTH_MODE=${VNC_AUTH_MODE:-legacy}
+# Hand the console session to $VNC_USER instead of leaving it with the runner
+# account. See switch_console_to() for why this is not the default.
+DESKTOP_USER_CONSOLE=${DESKTOP_USER_CONSOLE:-no}
 
 KICKSTART=${KICKSTART:-/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart}
 
@@ -31,50 +34,14 @@ sudo mdutil -i off -a >/dev/null 2>&1 || true
 # ---------------------------------------------------------------------------
 # Desktop account
 # ---------------------------------------------------------------------------
-# We cannot reuse `runner`: it holds a SecureToken and macOS refuses to reset
-# its password without the old one, so there is no credential to hand to a VNC
-# client. A fresh admin account sidesteps that entirely.
-if id "$VNC_USER" >/dev/null 2>&1; then
-  log "user $VNC_USER already exists"
-else
-  log "creating desktop account $VNC_USER"
-  # Output is captured rather than piped so the password can be scrubbed
-  # without building a regex out of it.
-  if sysadminctl_out=$(sudo sysadminctl -addUser "$VNC_USER" \
-        -fullName "VNC User" \
-        -password "$USER_PASSWORD" \
-        -home "/Users/$VNC_USER" \
-        -shell /bin/zsh \
-        -admin 2>&1); then
-    echo "${sysadminctl_out//"$USER_PASSWORD"/***}"
-  else
-    echo "${sysadminctl_out//"$USER_PASSWORD"/***}"
-    warn "sysadminctl failed, falling back to dscl"
-  fi
+ensure_desktop_user "$VNC_USER" "$USER_PASSWORD"
 
-  if ! id "$VNC_USER" >/dev/null 2>&1; then
-    sudo dscl . -create "/Users/$VNC_USER"
-    sudo dscl . -create "/Users/$VNC_USER" UserShell /bin/zsh
-    sudo dscl . -create "/Users/$VNC_USER" RealName "VNC User"
-    sudo dscl . -create "/Users/$VNC_USER" UniqueID 1001
-    sudo dscl . -create "/Users/$VNC_USER" PrimaryGroupID 20
-    sudo dscl . -create "/Users/$VNC_USER" NFSHomeDirectory "/Users/$VNC_USER"
-    sudo dscl . -passwd "/Users/$VNC_USER" "$USER_PASSWORD"
-    sudo dseditgroup -o edit -a "$VNC_USER" -t user admin
-  fi
+# Optionally hand the console session to the desktop account, so the desktop
+# served over VNC belongs to it rather than to the runner account.
+if [ "$DESKTOP_USER_CONSOLE" = yes ]; then
+  switch_console_to "$VNC_USER" "$USER_PASSWORD" || \
+    warn "continuing with $(console_user) on the console"
 fi
-
-sudo createhomedir -c -u "$VNC_USER" >/dev/null 2>&1 || true
-
-# A password that does not authenticate is the other way to get a "black"
-# screen: Screen Sharing accepts the connection then sits on a login window.
-if sudo dscl . -authonly "$VNC_USER" "$USER_PASSWORD" >/dev/null 2>&1; then
-  log "verified $VNC_USER can authenticate"
-else
-  die "$VNC_USER cannot authenticate with the supplied password -- check the VNC_USER_PASSWORD secret"
-fi
-
-skip_setup_assistant "$VNC_USER"
 
 # ---------------------------------------------------------------------------
 # Screen Sharing permissions

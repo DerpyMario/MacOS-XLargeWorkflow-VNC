@@ -196,8 +196,8 @@ skip_setup_assistant() {
 # without an image library on the box.
 probe_screen() {
   local out=${1:-/tmp/screen-probe.png}
-  local user
-  user=$(console_user)
+  local user=${2:-}
+  [ -n "$user" ] || user=$(console_user)
 
   log "capturing a screenshot as $user to verify the framebuffer"
   if ! as_user "$user" /usr/sbin/screencapture -x -t png "$out" 2>/dev/null; then
@@ -226,6 +226,129 @@ rustdesk_password_stored() {
   local config="$1/RustDesk.toml"
   sudo test -f "$config" || return 1
   sudo grep -Eq "^password[[:space:]]*=[[:space:]]*'.+'" "$config"
+}
+
+# ensure_desktop_user <user> <password> [full name]
+#
+# Creates the admin account the remote desktop runs as. The runner account
+# cannot be reused: it holds a SecureToken, so macOS refuses to reset its
+# password without the old one and there is no credential to hand to a client.
+ensure_desktop_user() {
+  local user=$1 password=$2 fullname=${3:-VNC User}
+
+  if id "$user" >/dev/null 2>&1; then
+    log "user $user already exists"
+  else
+    log "creating admin account $user"
+    # Output is captured rather than piped so the password can be scrubbed
+    # without building a regex out of it.
+    local out
+    if out=$(sudo sysadminctl -addUser "$user" \
+          -fullName "$fullname" \
+          -password "$password" \
+          -home "/Users/$user" \
+          -shell /bin/zsh \
+          -admin 2>&1); then
+      echo "${out//"$password"/***}"
+    else
+      echo "${out//"$password"/***}"
+      warn "sysadminctl failed, falling back to dscl"
+    fi
+
+    if ! id "$user" >/dev/null 2>&1; then
+      sudo dscl . -create "/Users/$user"
+      sudo dscl . -create "/Users/$user" UserShell /bin/zsh
+      sudo dscl . -create "/Users/$user" RealName "$fullname"
+      sudo dscl . -create "/Users/$user" UniqueID 1001
+      sudo dscl . -create "/Users/$user" PrimaryGroupID 20
+      sudo dscl . -create "/Users/$user" NFSHomeDirectory "/Users/$user"
+      sudo dscl . -passwd "/Users/$user" "$password"
+    fi
+  fi
+
+  # Admin rights are what let the account approve system prompts and control
+  # the screen once connected.
+  sudo dseditgroup -o edit -a "$user" -t user admin >/dev/null 2>&1 || true
+  sudo createhomedir -c -u "$user" >/dev/null 2>&1 || true
+
+  # A password that does not authenticate is another way to get a "black"
+  # screen: the server accepts the connection then sits on a login window.
+  if sudo dscl . -authonly "$user" "$password" >/dev/null 2>&1; then
+    log "verified $user can authenticate and is an admin"
+  else
+    die "$user cannot authenticate with the supplied password -- check the VNC_USER_PASSWORD secret"
+  fi
+
+  skip_setup_assistant "$user"
+}
+
+# True when the user owns a GUI (Aqua) session. Without one there is no window
+# server to capture, so a screen sharing tool started as that user has nothing
+# to send.
+user_has_gui_session() {
+  local uid
+  uid=$(id -u "$1" 2>/dev/null) || return 1
+  sudo launchctl print "gui/$uid" >/dev/null 2>&1
+}
+
+# Configure automatic login for a user. macOS obfuscates /etc/kcpassword with a
+# fixed XOR key rather than encrypting it.
+enable_autologin() {
+  local user=$1 password=$2
+  log "configuring automatic login for $user"
+  sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser -string "$user"
+  sudo defaults delete /Library/Preferences/com.apple.loginwindow DisableFDEAutoLogin >/dev/null 2>&1 || true
+
+  # Password arrives on stdin so it never appears in the process list.
+  printf '%s' "$password" | perl -we '
+    my @k = (0x7D,0x89,0x52,0x23,0xD2,0xBC,0xDD,0xEA,0xA3,0xB9,0x1F);
+    local $/;
+    my $p = <STDIN>;
+    $p =~ s/\n\z//;
+    $p .= "\0" x (12 - (length($p) % 12));
+    binmode STDOUT;
+    for my $i (0 .. length($p) - 1) {
+      print chr(ord(substr($p, $i, 1)) ^ $k[$i % 11]);
+    }' | sudo tee /etc/kcpassword >/dev/null
+  sudo chown root:wheel /etc/kcpassword 2>/dev/null || true
+  sudo chmod 600 /etc/kcpassword
+}
+
+# Hand the console session to <user> by restarting loginwindow, which re-reads
+# the autologin settings when it comes back up.
+#
+# This logs out whoever currently holds the console. On a hosted runner that is
+# the account the job itself runs under, so if the Actions agent lives in that
+# GUI session the job dies with it -- which is why this is opt-in.
+switch_console_to() {
+  local user=$1 password=$2
+  local before
+  before=$(console_user)
+
+  if [ "$before" = "$user" ]; then
+    log "$user already owns the console session"
+    return 0
+  fi
+
+  enable_autologin "$user" "$password"
+
+  log "restarting loginwindow to hand the console from $before to $user"
+  sudo killall loginwindow >/dev/null 2>&1 || true
+
+  local waited=0
+  while [ "$waited" -lt 90 ]; do
+    sleep 5
+    waited=$((waited + 5))
+    if [ "$(console_user)" = "$user" ]; then
+      log "$user now owns the console session after ${waited}s"
+      # The desktop needs a moment to finish drawing before anything captures it.
+      sleep 10
+      return 0
+    fi
+  done
+
+  warn "console session is still owned by $(console_user) after ${waited}s"
+  return 1
 }
 
 # Append a line to the run summary when we are inside GitHub Actions.

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# setup-rustdesk.sh <RUSTDESK_PASSWORD>
+# setup-rustdesk.sh <RUSTDESK_PASSWORD> [VNC_USER_PASSWORD]
 #
 # Installs RustDesk, pre-approves the permissions it needs and starts it in the
-# console GUI session. Prints the connection ID.
+# desktop account's GUI session. Prints the connection ID.
 #
 # Optional environment:
-#   RUSTDESK_HOST  self-hosted rendezvous/relay server
-#   RUSTDESK_KEY   public key for the self-hosted server
+#   RUSTDESK_HOST         self-hosted rendezvous/relay server
+#   RUSTDESK_KEY          public key for the self-hosted server
+#   VNC_USER              desktop account name (default vncuser)
+#   DESKTOP_USER_CONSOLE  yes = give the desktop account the console session
 
 set -uo pipefail
 
@@ -15,13 +17,44 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 source ./common.sh
 
 RUSTDESK_PASSWORD=${1:?RUSTDESK_PASSWORD is required}
+VNC_USER_PASSWORD=${2:-}
 RUSTDESK_HOST=${RUSTDESK_HOST:-}
 RUSTDESK_KEY=${RUSTDESK_KEY:-}
+VNC_USER=${VNC_USER:-vncuser}
+DESKTOP_USER_CONSOLE=${DESKTOP_USER_CONSOLE:-no}
 
 APP=/Applications/RustDesk.app
 BIN="$APP/Contents/MacOS/rustdesk"
 BUNDLE_ID=com.carriez.RustDesk
+
+# ---------------------------------------------------------------------------
+# Desktop account
+# ---------------------------------------------------------------------------
+# RustDesk runs as the dedicated admin account rather than the runner account,
+# so the remote session is a normal desktop login with a password you control.
+if [ -n "$VNC_USER_PASSWORD" ]; then
+  ensure_desktop_user "$VNC_USER" "$VNC_USER_PASSWORD"
+  if [ "$DESKTOP_USER_CONSOLE" = yes ]; then
+    switch_console_to "$VNC_USER" "$VNC_USER_PASSWORD" || \
+      warn "continuing with $(console_user) on the console"
+  fi
+else
+  warn "no VNC_USER_PASSWORD supplied -- cannot create the $VNC_USER account"
+fi
+
+# RustDesk can only capture a session that has a window server behind it, so it
+# runs as the desktop account when that account is logged in, and falls back to
+# whoever holds the console when it is not.
 CONSOLE_USER=$(console_user)
+if user_has_gui_session "$VNC_USER"; then
+  DESKTOP_USER=$VNC_USER
+  log "running RustDesk as $DESKTOP_USER (has a GUI session)"
+else
+  DESKTOP_USER=$CONSOLE_USER
+  warn "$VNC_USER has no GUI session, so there would be no screen to capture"
+  warn "falling back to the console account '$CONSOLE_USER'"
+  warn "set DESKTOP_USER_CONSOLE=yes to log $VNC_USER in and hand it the console"
+fi
 
 log "installing RustDesk"
 if [ ! -d "$APP" ]; then
@@ -76,7 +109,7 @@ else
   echo "::warning::RustDesk has no Screen Recording permission; it will connect but never send an image. Use the VNC backend."
 fi
 
-keep_display_awake "$CONSOLE_USER"
+keep_display_awake "$DESKTOP_USER"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -92,9 +125,9 @@ keep_display_awake "$CONSOLE_USER"
 #                       regenerates whenever the app restarts, invalidating
 #                       whatever was printed in the log.
 #
-# The GUI app answers connections here and reads the console user's config, but
-# some builds ship a root service that would read /var/root instead, so both are
-# written to keep the two in agreement.
+# The GUI app answers connections here and reads the desktop account's config,
+# but some builds ship a root service that would read /var/root instead, so both
+# are written to keep the two in agreement.
 write_rustdesk_config() {
   local dir=$1 owner=$2
   sudo mkdir -p "$dir"
@@ -110,9 +143,9 @@ EOF
   log "wrote unattended-access config to $dir"
 }
 
-USER_CONFIG="/Users/$CONSOLE_USER/Library/Preferences/$BUNDLE_ID"
+USER_CONFIG="/Users/$DESKTOP_USER/Library/Preferences/$BUNDLE_ID"
 ROOT_CONFIG="/var/root/Library/Preferences/$BUNDLE_ID"
-write_rustdesk_config "$USER_CONFIG" "$CONSOLE_USER"
+write_rustdesk_config "$USER_CONFIG" "$DESKTOP_USER"
 write_rustdesk_config "$ROOT_CONFIG" root
 
 [ -n "$RUSTDESK_HOST" ] && log "pointing RustDesk at the self-hosted server $RUSTDESK_HOST"
@@ -120,8 +153,8 @@ write_rustdesk_config "$ROOT_CONFIG" root
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
-log "starting RustDesk in ${CONSOLE_USER}'s GUI session"
-as_user "$CONSOLE_USER" open -a "$APP" || warn "open -a returned non-zero"
+log "starting RustDesk in ${DESKTOP_USER}'s GUI session"
+as_user "$DESKTOP_USER" open -a "$APP" || warn "open -a returned non-zero"
 
 # The background service is deliberately not started. It keeps its own config
 # under /var/root with its own ID, so running it alongside the GUI app gives the
@@ -131,7 +164,7 @@ as_user "$CONSOLE_USER" open -a "$APP" || warn "open -a returned non-zero"
 
 log "waiting for RustDesk to register an ID"
 for _ in $(seq 1 30); do
-  RUSTDESK_ID=$(as_user "$CONSOLE_USER" "$BIN" --get-id 2>/dev/null | tr -d '[:space:]')
+  RUSTDESK_ID=$(as_user "$DESKTOP_USER" "$BIN" --get-id 2>/dev/null | tr -d '[:space:]')
   [ -n "${RUSTDESK_ID:-}" ] && break
   sleep 5
 done
@@ -139,12 +172,12 @@ done
 [ -n "${RUSTDESK_ID:-}" ] || die "RustDesk never produced an ID -- check that the app launched"
 
 # Set the permanent password on both instances, for the same reason the config
-# is written twice. Success is judged on the console user's config, since that
+# is written twice. Success is judged on the desktop account's config, since that
 # is the one the answering GUI app reads -- a password that only landed in
 # root's config would still leave the app handing out one-time codes.
 log "setting the unattended access password"
 for _ in $(seq 1 5); do
-  as_user "$CONSOLE_USER" "$BIN" --password "$RUSTDESK_PASSWORD" >/dev/null 2>&1
+  as_user "$DESKTOP_USER" "$BIN" --password "$RUSTDESK_PASSWORD" >/dev/null 2>&1
   sudo "$BIN" --password "$RUSTDESK_PASSWORD" >/dev/null 2>&1
   if rustdesk_password_stored "$USER_CONFIG"; then
     password_set=yes
@@ -172,10 +205,10 @@ if rustdesk_options_ok "$USER_CONFIG"; then
   log "unattended access is configured: password auth, no click-to-accept"
 else
   warn "RustDesk overwrote the unattended settings on startup -- rewriting and restarting"
-  write_rustdesk_config "$USER_CONFIG" "$CONSOLE_USER"
-  as_user "$CONSOLE_USER" killall RustDesk >/dev/null 2>&1 || true
+  write_rustdesk_config "$USER_CONFIG" "$DESKTOP_USER"
+  as_user "$DESKTOP_USER" killall RustDesk >/dev/null 2>&1 || true
   sleep 3
-  as_user "$CONSOLE_USER" open -a "$APP" >/dev/null 2>&1 || true
+  as_user "$DESKTOP_USER" open -a "$APP" >/dev/null 2>&1 || true
   sleep 8
   if rustdesk_options_ok "$USER_CONFIG"; then
     log "unattended access is configured after the restart"
@@ -186,7 +219,7 @@ else
   fi
 fi
 
-probe_screen /tmp/rustdesk-probe.png || \
+probe_screen /tmp/rustdesk-probe.png "$DESKTOP_USER" || \
   warn "the screen probe did not look healthy -- see the troubleshooting notes in the README"
 
 log "RustDesk ID: $RUSTDESK_ID"
