@@ -6,9 +6,10 @@ on:
       runner:
         description: 'Runner image'
         type: choice
-        default: macos-26-intel
+        default: xcode-27
         options:
           - macos-26-intel
+          - xcode-27
           - macos-26
           - macos-15-intel
           - macos-15
