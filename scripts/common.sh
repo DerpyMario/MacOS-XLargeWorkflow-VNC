@@ -27,7 +27,37 @@ as_user() {
 
 sip_disabled() { csrutil status 2>/dev/null | grep -qi disabled; }
 
-# tcc_grant <db-path> <service> <client> <client-type>
+# The code requirement blob tccd matches a client against. Entries carrying a
+# NULL csreq are the first thing tccd distrusts, so compute the real one.
+csreq_hex() {
+  local target=$1 requirement tmp hex
+  requirement=$(codesign -d -r- "$target" 2>&1 | sed -n 's/^designated => //p')
+  [ -n "$requirement" ] || return 1
+  tmp=$(mktemp)
+  printf '%s' "$requirement" | csreq -r- -b "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+  hex=$(xxd -p "$tmp" | tr -d '\n')
+  rm -f "$tmp"
+  [ -n "$hex" ] || return 1
+  printf '%s' "$hex"
+}
+
+# tcc_verify <db-path> <service> <client>
+#
+# Reads the grant back. A write that reports success can still leave nothing
+# behind, so this is what decides whether a permission is really in place.
+tcc_verify() {
+  local db=$1 service=$2 client=$3 value
+  sudo test -f "$db" || return 1
+  value=$(sudo sqlite3 "$db" \
+    "SELECT auth_value FROM access WHERE service='$service' AND client='$client' LIMIT 1;" 2>/dev/null)
+  [ "$value" = 2 ] && return 0
+  # Pre-Big Sur schema stores the same thing in `allowed`.
+  value=$(sudo sqlite3 "$db" \
+    "SELECT allowed FROM access WHERE service='$service' AND client='$client' LIMIT 1;" 2>/dev/null)
+  [ "$value" = 1 ]
+}
+
+# tcc_grant <db-path> <service> <client> <client-type> [csreq-hex]
 #
 # Pre-approves a TCC permission by writing straight into the consent database.
 # macOS never shows a permission prompt on a headless CI box, and an unanswered
@@ -36,12 +66,16 @@ sip_disabled() { csrutil status 2>/dev/null | grep -qi disabled; }
 #
 # The `access` table has gained and lost columns across macOS releases, so the
 # INSERT is built from whatever columns this machine actually has.
+#
+# Returns non-zero when the grant is not readable afterwards, which is the
+# normal outcome while SIP is enabled: the database is protected from root, so
+# no amount of privilege makes the write stick.
 tcc_grant() {
-  local db=$1 service=$2 client=$3 client_type=${4:-0}
+  local db=$1 service=$2 client=$3 client_type=${4:-0} csreq=${5:-}
   local now cols=() vals=() name
   now=$(date +%s)
 
-  sudo test -f "$db" || return 0
+  sudo test -f "$db" || return 1
 
   while IFS='|' read -r _ name _; do
     case $name in
@@ -59,38 +93,42 @@ tcc_grant() {
       last_modified)                   cols+=(last_modified);                   vals+=("$now") ;;
       boot_uuid)                       cols+=(boot_uuid);                       vals+=("'UNUSED'") ;;
       last_reminded)                   cols+=(last_reminded);                   vals+=("$now") ;;
+      csreq)   [ -n "$csreq" ] && { cols+=(csreq); vals+=("X'$csreq'"); } ;;
     esac
   done < <(sudo sqlite3 "$db" "PRAGMA table_info(access);" 2>/dev/null)
 
-  [ ${#cols[@]} -gt 0 ] || { warn "could not read TCC schema from $db"; return 0; }
+  [ ${#cols[@]} -gt 0 ] || { warn "could not read TCC schema from $db"; return 1; }
 
   local col_list val_list
   col_list=$(IFS=,; echo "${cols[*]}")
   val_list=$(IFS=,; echo "${vals[*]}")
 
-  if sudo sqlite3 "$db" \
-      "INSERT OR REPLACE INTO access ($col_list) VALUES ($val_list);" 2>/dev/null; then
+  sudo sqlite3 "$db" \
+    "INSERT OR REPLACE INTO access ($col_list) VALUES ($val_list);" 2>/dev/null
+
+  if tcc_verify "$db" "$service" "$client"; then
     log "granted $service to $client"
-  else
-    warn "could not grant $service to $client in $db"
-    sip_disabled || warn "System Integrity Protection is enabled -- TCC writes are blocked"
+    return 0
   fi
+  return 1
 }
 
 # Grant a service to a client in the system database and in every user database
 # we care about. Screen Recording and Accessibility are system-scoped, but
 # seeding the per-user databases too costs nothing and covers older layouts.
+# Returns zero when at least one database ended up holding the grant.
 tcc_grant_all() {
-  local service=$1 client=$2 client_type=${3:-0} user
-  tcc_grant "$SYSTEM_TCC" "$service" "$client" "$client_type"
+  local service=$1 client=$2 client_type=${3:-0} csreq=${4:-} user granted=1
+  tcc_grant "$SYSTEM_TCC" "$service" "$client" "$client_type" "$csreq" && granted=0
   for user in "${TCC_USERS[@]:-}"; do
     [ -n "$user" ] || continue
     local home
     home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
     [ -n "$home" ] || continue
     tcc_grant "$home/Library/Application Support/com.apple.TCC/TCC.db" \
-      "$service" "$client" "$client_type"
+      "$service" "$client" "$client_type" "$csreq" && granted=0
   done
+  return $granted
 }
 
 # tccd caches its decisions in memory, so a database written behind its back is
