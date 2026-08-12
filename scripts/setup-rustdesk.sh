@@ -41,12 +41,40 @@ sudo xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
 TCC_USERS=("$CONSOLE_USER" "${VNC_USER:-vncuser}" root)
 
 log "pre-approving Screen Recording, Accessibility and input monitoring"
+if CSREQ=$(csreq_hex "$APP"); then
+  log "computed the code requirement for $BUNDLE_ID"
+else
+  CSREQ=""
+  warn "could not compute a code requirement -- tccd is more likely to ignore the grant"
+fi
+
+SCREEN_GRANTED=no
 for service in kTCCServiceScreenCapture kTCCServiceAccessibility \
                kTCCServicePostEvent kTCCServiceListenEvent; do
-  tcc_grant_all "$service" "$BUNDLE_ID" 0
-  tcc_grant_all "$service" "$BIN" 1
+  granted=no
+  tcc_grant_all "$service" "$BUNDLE_ID" 0 "$CSREQ" && granted=yes
+  tcc_grant_all "$service" "$BIN" 1 "$CSREQ" && granted=yes
+  [ "$service" = kTCCServiceScreenCapture ] && SCREEN_GRANTED=$granted
 done
 restart_tccd
+
+# Screen capture is the one permission RustDesk cannot work without, and it is
+# also the one that cannot be self-granted on a locked-down machine. Say so
+# plainly here rather than letting it surface as a viewer that hangs on
+# "Connected, waiting for image".
+if [ "$SCREEN_GRANTED" = yes ]; then
+  log "Screen Recording grant is present in the consent database"
+else
+  warn "Screen Recording could NOT be granted to RustDesk"
+  if sip_disabled; then
+    warn "SIP is disabled, so the write failed for another reason -- see the log above"
+  else
+    warn "System Integrity Protection is enabled: TCC.db is protected from root,"
+    warn "so no third-party app can be pre-authorised for screen capture here."
+    warn "Apple's own Screen Sharing is exempt, so use the VNC backend for the picture."
+  fi
+  echo "::warning::RustDesk has no Screen Recording permission; it will connect but never send an image. Use the VNC backend."
+fi
 
 keep_display_awake "$CONSOLE_USER"
 
@@ -171,4 +199,13 @@ summary "| | |"
 summary "|---|---|"
 summary "| ID | \`$RUSTDESK_ID\` |"
 summary "| Password | the \`RUSTDESK_PASSWORD\` secret |"
+if [ "$SCREEN_GRANTED" = yes ]; then
+  summary "| Screen Recording | granted |"
+else
+  summary "| Screen Recording | **not granted** -- terminal and file transfer work, the screen stays blank |"
+  summary ""
+  summary "SIP protects the consent database on this runner, so a third-party app "
+  summary "cannot be pre-authorised for screen capture. Use the VNC backend for the "
+  summary "picture -- Apple's Screen Sharing is exempt from that restriction."
+fi
 summary ""

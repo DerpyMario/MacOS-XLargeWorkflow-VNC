@@ -89,6 +89,44 @@ as the permanent password, and then **verifies both actually persisted** —
 RustDesk rewrites its own config on startup, so the run re-applies them and
 restarts the app if they did not stick.
 
+### RustDesk connects but the screen stays blank
+
+If the viewer sits on **"Connected, waiting for image"** while RustDesk's
+**terminal and file manager work fine**, the connection is healthy and the
+missing piece is Screen Recording — the terminal and file transfer do not need
+that permission, screen capture does.
+
+This is a platform limitation, not a configuration mistake. Granting Screen
+Recording to a third-party app means writing to `TCC.db`, which **System
+Integrity Protection protects even from root**. When SIP is enabled — as it is
+on GitHub-hosted runners — no third-party app can be pre-authorised for screen
+capture without someone clicking the prompt on the machine itself.
+
+**Apple's own Screen Sharing is exempt from that restriction**, which is why
+the VNC backend can produce a picture where RustDesk cannot. So:
+
+* **For the desktop image, use the VNC backend** over the ngrok tunnel.
+* RustDesk remains useful for **terminal access and file transfer**, which work
+  regardless. Running `backend: both` gets you each of them.
+
+Every run now states which situation it is in, rather than leaving you to infer
+it from a hanging viewer:
+
+```
+==> Screen Recording grant is present in the consent database
+```
+```
+[warn] Screen Recording could NOT be granted to RustDesk
+[warn] System Integrity Protection is enabled: TCC.db is protected from root,
+[warn] so no third-party app can be pre-authorised for screen capture here.
+[warn] Apple's own Screen Sharing is exempt, so use the VNC backend for the picture.
+```
+
+The same verdict is written to the run summary. Note that the `screen-probe`
+artifact can be empty even when Screen Sharing works: `screencapture` launched
+from a CI shell inherits the shell's (absent) permission, so treat a failed
+probe as inconclusive rather than proof the display is dead.
+
 *NOTE* If you're using Apple Screen Sharing or RealVNC Viewer, use the system username and password ("VNC User"/your set password), NOT your VNC-only password!
 
 ## Why the screen used to come up black
