@@ -165,6 +165,6 @@ jobs:
             else
               echo "[$(date -u +%H:%M:%S)] ${left}m left -- RustDesk ID ${{ steps.rustdesk.outputs.rustdesk_id }}"
             fi
-            sleep 300
+            sleep 360
           done
           echo "Session window elapsed, shutting down."
