@@ -1,0 +1,23 @@
+
+name: Backup macOS Screensavers
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: xcode-27
+
+    steps:
+      - name: Find and compress macOS screensavers
+        run: |
+          brew install sevenzip
+          mkdir -p "$RUNNER_TEMP/screensavers"
+          find /System/Library/Screen\ Savers /Library/Screen\ Savers "$HOME/Library/Screen\ Savers" -type d -name '*.saver' -prune -exec cp -R {} "$RUNNER_TEMP/screensavers/" \; 2>/dev/null || true
+          7zz a "$GITHUB_WORKSPACE/macos-screensavers.7z" "$RUNNER_TEMP/screensavers/*"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-screensavers-7z
+          path: macos-screensavers.7z
