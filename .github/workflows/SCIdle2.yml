@@ -1,4 +1,3 @@
-
 name: Backup macOS Screensavers and Aerial Assets
 
 on:
@@ -12,7 +11,7 @@ on:
 
 jobs:
   backup:
-    runs-on: xcode-27
+    runs-on: macos-14
 
     steps:
       - name: Install 7-Zip
