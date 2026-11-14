@@ -1,0 +1,94 @@
+
+name: Backup macOS Screensavers and Aerial Assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_system_assets:
+        description: Include system screensaver resources
+        type: boolean
+        default: true
+        required: true
+
+jobs:
+  backup:
+    runs-on: xcode-27
+
+    steps:
+      - name: Install 7-Zip
+        run: brew install sevenzip
+
+      - name: Collect screensavers and aerial assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEST="$RUNNER_TEMP/macos-screensavers"
+          mkdir -p "$DEST"/{bundles,aerial,resources,metadata}
+
+          # Screensaver bundles
+          for DIR in \
+            "/System/Library/Screen Savers" \
+            "/Library/Screen Savers" \
+            "$HOME/Library/Screen Savers"
+          do
+            if [[ -d "$DIR" ]]; then
+              find "$DIR" -type d -name '*.saver' -prune \
+                -exec ditto {} "$DEST/bundles/$(basename {}).saver" \; \
+                2>/dev/null || true
+            fi
+          done
+
+          # Aerial screensaver assets
+          for DIR in \
+            "/Library/Application Support/com.apple.idleassetsd" \
+            "$HOME/Library/Application Support/com.apple.idleassetsd"
+          do
+            if [[ -d "$DIR" ]]; then
+              ditto "$DIR" "$DEST/aerial/$(basename "$DIR")" \
+                2>/dev/null || true
+            fi
+          done
+
+          # Additional related resources
+          find \
+            "/System/Library/Screen Savers" \
+            "/Library/Screen Savers" \
+            "$HOME/Library/Screen Savers" \
+            -type f \( \
+              -iname '*.mov' -o \
+              -iname '*.mp4' -o \
+              -iname '*.heic' -o \
+              -iname '*.jpg' -o \
+              -iname '*.plist' \
+            \) -print0 2>/dev/null |
+          while IFS= read -r -d '' FILE; do
+            cp -p "$FILE" "$DEST/resources/" 2>/dev/null || true
+          done
+
+          # Screensaver preferences
+          find "$HOME/Library/Preferences/ByHost" \
+            -maxdepth 1 -iname '*screensaver*' \
+            -exec cp -p {} "$DEST/metadata/" \; \
+            2>/dev/null || true
+
+          # Inventory
+          find "$DEST" -type f > "$DEST/metadata/inventory.txt"
+
+          echo "Collected files:"
+          du -sh "$DEST"
+          find "$DEST" -maxdepth 2 -print
+
+      - name: Create 7-Zip archive
+        run: |
+          7zz a -t7z -mx=7 \
+            "$GITHUB_WORKSPACE/macos-screensavers.7z" \
+            "$RUNNER_TEMP/macos-screensavers"
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-screensavers-and-aerial-assets
+          path: macos-screensavers.7z
+          if-no-files-found: error
+          retention-days: 14
