@@ -19,64 +19,127 @@ jobs:
 
       - name: Collect screensavers and aerial assets
         shell: bash
+        env:
+          INCLUDE_SYSTEM_ASSETS: ${{ inputs.include_system_assets }}
         run: |
           set -euo pipefail
 
           DEST="$RUNNER_TEMP/macos-screensavers"
           mkdir -p "$DEST"/{bundles,aerial,resources,metadata}
 
-          # Screensaver bundles
-          for DIR in \
-            "/System/Library/Screen Savers" \
-            "/Library/Screen Savers" \
-            "$HOME/Library/Screen Savers"
-          do
-            if [[ -d "$DIR" ]]; then
-              find "$DIR" -type d -name '*.saver' -prune \
-                -exec ditto {} "$DEST/bundles/$(basename {}).saver" \; \
-                2>/dev/null || true
-            fi
-          done
+          # Define source directories
+          SAVER_DIRS=()
+          SAVER_LABELS=()
+          AERIAL_DIRS=()
+          AERIAL_LABELS=()
 
-          # Aerial screensaver assets
-          for DIR in \
-            "/Library/Application Support/com.apple.idleassetsd" \
+          if [[ "$INCLUDE_SYSTEM_ASSETS" == "true" ]]; then
+            SAVER_DIRS+=(
+              "/System/Library/Screen Savers"
+              "/Library/Screen Savers"
+            )
+            SAVER_LABELS+=(system library)
+
+            AERIAL_DIRS+=(
+              "/Library/Application Support/com.apple.idleassetsd"
+            )
+            AERIAL_LABELS+=(system)
+          fi
+
+          SAVER_DIRS+=("$HOME/Library/Screen Savers")
+          SAVER_LABELS+=(user)
+
+          AERIAL_DIRS+=(
             "$HOME/Library/Application Support/com.apple.idleassetsd"
-          do
-            if [[ -d "$DIR" ]]; then
-              ditto "$DIR" "$DEST/aerial/$(basename "$DIR")" \
-                2>/dev/null || true
+          )
+          AERIAL_LABELS+=(user)
+
+          # Collect complete screensaver bundles
+          for i in "${!SAVER_DIRS[@]}"; do
+            DIR="${SAVER_DIRS[$i]}"
+            LABEL="${SAVER_LABELS[$i]}"
+
+            [[ -d "$DIR" ]] || continue
+
+            while IFS= read -r -d '' BUNDLE; do
+              NAME="$(basename "$BUNDLE")"
+              TARGET="$DEST/bundles/$LABEL/$NAME"
+
+              mkdir -p "$(dirname "$TARGET")"
+
+              if ! ditto "$BUNDLE" "$TARGET" 2>/dev/null; then
+                echo "::warning::Could not copy $BUNDLE"
+              fi
+            done < <(
+              find "$DIR" -type d -name '*.saver' -prune -print0 2>/dev/null || true
+            )
+          done
+
+          # Collect aerial video assets
+          for i in "${!AERIAL_DIRS[@]}"; do
+            DIR="${AERIAL_DIRS[$i]}"
+            LABEL="${AERIAL_LABELS[$i]}"
+
+            [[ -d "$DIR" ]] || continue
+
+            if ! ditto "$DIR" "$DEST/aerial/$LABEL-idleassetsd" 2>/dev/null; then
+              echo "::warning::Could not copy aerial assets from $DIR"
             fi
           done
 
-          # Additional related resources
-          find \
-            "/System/Library/Screen Savers" \
-            "/Library/Screen Savers" \
-            "$HOME/Library/Screen Savers" \
-            -type f \( \
-              -iname '*.mov' -o \
-              -iname '*.mp4' -o \
-              -iname '*.heic' -o \
-              -iname '*.jpg' -o \
-              -iname '*.plist' \
-            \) -print0 2>/dev/null |
-          while IFS= read -r -d '' FILE; do
-            cp -p "$FILE" "$DEST/resources/" 2>/dev/null || true
+          # Collect additional media and resource files
+          for i in "${!SAVER_DIRS[@]}"; do
+            DIR="${SAVER_DIRS[$i]}"
+            LABEL="${SAVER_LABELS[$i]}"
+
+            [[ -d "$DIR" ]] || continue
+
+            while IFS= read -r -d '' FILE; do
+              RELATIVE="${FILE#"$DIR"/}"
+              TARGET="$DEST/resources/$LABEL/$RELATIVE"
+
+              mkdir -p "$(dirname "$TARGET")"
+
+              if ! cp -p "$FILE" "$TARGET" 2>/dev/null; then
+                echo "::warning::Could not copy $FILE"
+              fi
+            done < <(
+              find "$DIR" -type f \( \
+                -iname '*.mov' -o \
+                -iname '*.mp4' -o \
+                -iname '*.m4v' -o \
+                -iname '*.heic' -o \
+                -iname '*.jpg' -o \
+                -iname '*.jpeg' -o \
+                -iname '*.plist' \
+              \) -print0 2>/dev/null || true
+            )
           done
 
-          # Screensaver preferences
-          find "$HOME/Library/Preferences/ByHost" \
-            -maxdepth 1 -iname '*screensaver*' \
-            -exec cp -p {} "$DEST/metadata/" \; \
-            2>/dev/null || true
+          # Collect screensaver preferences
+          for PREF_DIR in \
+            "$HOME/Library/Preferences" \
+            "$HOME/Library/Preferences/ByHost"
+          do
+            [[ -d "$PREF_DIR" ]] || continue
 
-          # Inventory
-          find "$DEST" -type f > "$DEST/metadata/inventory.txt"
+            while IFS= read -r -d '' FILE; do
+              cp -p "$FILE" "$DEST/metadata/" 2>/dev/null || true
+            done < <(
+              find "$PREF_DIR" -maxdepth 1 -type f \
+                -iname '*screensaver*' -print0 2>/dev/null || true
+            )
+          done
 
+          # Generate inventory, excluding the inventory itself
+          find "$DEST" -type f ! -name inventory.txt -print |
+            LC_ALL=C sort > "$DEST/metadata/inventory.txt"
+
+          echo "Screensaver collection completed."
           echo "Collected files:"
+          find "$DEST" -type f | wc -l
           du -sh "$DEST"
-          find "$DEST" -maxdepth 2 -print
+          find "$DEST" -maxdepth 3 -print
 
       - name: Create 7-Zip archive
         run: |
